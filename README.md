@@ -35,3 +35,7 @@ and set the spawner class to SSHSpawner:
 from sshspawner import SSHSpawner
 c.JupyterHub.spawner_class = SSHSpawner
 ```
+
+## License
+
+LLNL-CODE-771750
