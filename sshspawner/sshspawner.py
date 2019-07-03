@@ -15,16 +15,26 @@ import pipes
 import pwd
 import re
 import random
+import stat
 import pexpect
 import shutil
+from pexpect import popen_spawn
 from tempfile import mkdtemp
 from jupyterhub.spawner import LocalProcessSpawner
+from traitlets import default
 from traitlets import (
-    Dict, Unicode,
+    Bool, Integer, Unicode, Int, List
 )
 from jupyterhub.utils import (
     random_port, can_connect, wait_for_http_server, make_ssl_context
 )
+
+_script_template = """
+#!/bin/bash
+# entrypoint for shared kernel link?
+# start the notebook with appropriate args
+{}
+"""
 
 
 class HostNotFound(Exception):
@@ -39,67 +49,10 @@ class ConnectionError(Exception):
                          "Unable to connect to host {host}".format(host=host))
 
 
-def ips_for_host(host):
-    """Return all the ips reported by the host command"""
-
-    ip_pattern = r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
-    child = pexpect.spawn("host {}".format(host))
-    i = child.expect(["Host \w+ not found", ".*has address.*"])
-    if i == 0:
-        raise HostNotFound(host)
-    else:
-        lines = child.read().split('\n')
-
-        # Look for ip addresses and build a list of the ones found
-        lines = [match.group() for match
-                 in [re.search(ip_pattern, line) for line in lines]
-                 if match]
-
-        if len(lines) == 0:
-            raise HostNotFound(host)
-
-        return lines
-
-
-def get_target_ip(host):
-    """Return an ip we can connect to from the list of ips gathered from
-    the host command."""
-
-    ips = ips_for_host(host)
-    random.shuffle(ips)
-    for ip in ips:
-        if can_connect(ip, 22):
-            return ip
-    raise ConnectionError(host)
-
-
-def ssh_opts(socket_dir="/tmp", persist=180, known_hosts=""):
-    """Default set of options to attach to ssh commands
-
-    The minimum arguments are a good, known_hosts file and enabling
-    batch mode. The known_hosts file avoids user's known_hosts files
-    which may not trust other hosts. Batch mode will cause ssh to fail
-    on prompting for a password.
-    """
-
-    return [
-        "-o UserKnownHostsFile={}".format(known_hosts),
-        "-o ControlMaster=auto",
-        "-o ControlPath={}".format(socket_dir),
-        "-o ControlPersist={}".format(persist),
-        "-o BatchMode=yes",
-    ]
-
-
 class SSHSpawner(LocalProcessSpawner):
     local_resource_path = "/tmp"
 
     ssh_target = ""
-
-    prefix = Unicode(
-        "/tmp",
-        help="The absolute path to where notebook resources will be placed"
-    ).tag(config=True)
 
     resource_path = Unicode(
         ".jupyter/jupyterhub/resources",
@@ -114,18 +67,149 @@ class SSHSpawner(LocalProcessSpawner):
         help="Premade known_hosts file to enable trusted, seamless ssh."
     ).tag(config=True)
 
+    ssh_hosts = List(
+        [],
+        help="List of available hosts to ssh to."
+    ).tag(config=True)
+
+    allow_origin_pattern = Unicode(
+        "",
+        help="Pattern for CORS requests (when behind a reverse proxy)"
+    ).tag(config=True)
+
     local_logfile = Unicode(
         "",
         help="""Name of the file to redirect stdout and stderr from the remote
         notebook."""
     ).tag(config=True)
 
+    ssh_control_persist_time = Int(
+        1,
+        help="""The amount of time for SSH connections over the control master
+        will stay active"""
+    ).tag(config=True)
+
+    cleanup_server = Bool(
+        True,
+        help="Teardown the notebook server when contact is lost with the hub."
+    ).tag(config=True)
+
+    hub_check_interval = Integer(
+        5,
+        help="Interval in minutes to check if notebook has been orphaned."
+    ).tag(config=True)
+
+    notebook_max_lifetime = Integer(
+        12,
+        help="Max lifetime in hours for a remotely spawned notebook to live."
+    ).tag(config=True)
+
+    idle_timeout = Integer(
+        300,
+        help="""The amount of time before culling an idle kernel."""
+    ).tag(config=True)
+
+    start_notebook_cmd = Unicode(
+        "stop-notebook",
+        help="""The command to run to start a notebook"""
+    ).tag(config=True)
+
+    stop_notebook_cmd = Unicode(
+        "stop-notebook",
+        help="""The command to run to stop a running notebook"""
+    ).tag(config=True)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.local_resource_path = mkdtemp()
-        os.makedirs(self.local_resource_path, 0o700, exist_ok=True)
 
-    async def expect_as_user(self, cmd, timeout=10):
+    def get_user_ssh_hosts(self):
+        return self.ssh_hosts
+
+    @default('options_form')
+    def _options_form(self):
+        """Populate a list of ssh targets on the pre_spawn form"""
+
+        hosts = self.get_user_ssh_hosts()
+        if not hosts:
+            # FIXME: Need a better way of testing this ahead of time
+            return """
+            <p>Unable to get SSH targets</p>
+            """
+        host_option_template = '<option value="{host}">{host}</option>'
+        host_option_tags = []
+        for host in hosts:
+            host_option_tags.append(
+                host_option_template.format(host=host))
+        options = ''.join(host_option_tags)
+
+        return """
+        <label for="host">Select host for notebook launch:</label>
+        <select name="host" class="form-control">{options}</select>
+        """.format(options=options)
+
+    def options_from_form(self, formdata):
+        """Turn html formdata from `options_form` into a dict for later use"""
+
+        options = {}
+        options['host'] = formdata.get('host', [''])[0].strip()
+        return options
+
+    def ips_for_host(self, host):
+        """Return all the ips reported by the host command"""
+
+        ip_pattern = r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+        child = pexpect.spawn("host {}".format(host), encoding="utf-8")
+        i = child.expect([r"Host \w+ not found", ".*has address.*"])
+        if i == 0:
+            raise HostNotFound(host)
+        else:
+            lines = child.after.split('\n')
+
+            # Look for ip addresses and build a list of the ones found
+            lines = [match.group() for match
+                     in [re.search(ip_pattern, line) for line in lines]
+                     if match]
+
+            if len(lines) == 0:
+                raise HostNotFound(host)
+
+            return lines
+
+    def ssh_opts(self, sockets="/tmp/%r@%h:%p", persist=180,
+                 known_hosts="", batch_mode=True, other_opts=None):
+        """Default set of options to attach to ssh commands
+
+        The minimum arguments are a good, known_hosts file and enabling
+        batch mode. The known_hosts file avoids user's known_hosts files
+        which may not trust other hosts. Batch mode will cause ssh to fail
+        on prompting for a password.
+
+        This implementation also uses ssh ControlMaster to speed up and
+        simplify repeated operations over SSH.
+        """
+
+        opts = {
+            "ControlMaster": "auto",
+            "ControlPath": sockets,
+            "ControlPersist": persist,
+            "BatchMode": batch_mode,
+        }
+
+        if known_hosts:
+            opts["UserKnownHostsFile"] = known_hosts
+        else:
+            self.log.warning("Skipping host key check")
+            opts["StrictHostKeyChecking"] = "no"
+
+        if other_opts:
+            opts.extend(other_opts)
+
+        tmpl = "-o {opt}={val}"
+        return ' '.join(
+                [tmpl.format(opt=opt, val=val) for opt, val in opts.items()])
+
+    async def spawn_as_user(self, cmd, timeout=10):
         """Run pexpect as the user spawning the notebook
 
         This method attaches kerberos credentals to the command env if they
@@ -134,15 +218,20 @@ class SSHSpawner(LocalProcessSpawner):
 
         env = os.environ
         auth_state = await self.user.get_auth_state()
-        env['KRB5CCNAME'] = auth_state.get('krb5ccname', "")
+        if auth_state:
+            env["KRB5CCNAME"] = auth_state.get("krb5ccname", "")
 
         popen_kwargs = dict(
-            timeout=timeout,
             env=env,
+            timeout=timeout,
+            encoding="utf-8",
             preexec_fn=self.make_preexec_fn(self.user.name)
         )
 
-        return pexpect.popen_spawn.PopenSpawn(cmd, **popen_kwargs)
+        self.log.debug("Running: {cmd} as {user}".format(
+                cmd=cmd,
+                user=self.user.name))
+        return popen_spawn.PopenSpawn(cmd, **popen_kwargs)
 
     async def remote_env(self, host=None):
         """Command with the `get_env` environment as the input to `/bin/env`
@@ -152,9 +241,10 @@ class SSHSpawner(LocalProcessSpawner):
         """
 
         def env_str_to_dict(output):
+            "Convert the output of `env` into a dict"
+
             d = {}
             lines = output.split('\n')
-            self.log.debug(lines)
             for line in lines:
                 divided = line.split('=')
                 if len(divided) == 2:
@@ -166,8 +256,29 @@ class SSHSpawner(LocalProcessSpawner):
             return d
 
         if host:
-            child = await self.expect_as_user("ssh {opts} /bin/env")
-            return env_str_to_dict(child.read())
+            opts = self.ssh_opts(
+                known_hosts=self.known_hosts
+            )
+            self.log.info("Collecting remote environment from {}".format(host))
+            child = await self.spawn_as_user(
+                "ssh {opts} {host} env".format(opts=opts, host=host)
+            )
+            return env_str_to_dict(child.after)
+
+    def ip_for_host(self, host):
+        """Return an ip for a given host
+
+        This method is meant to pick from a series of ips that come back from
+        invoking the host command. This could be used to implement load
+        balancing.
+        """
+
+        ips = self.ips_for_host(host)
+        random.shuffle(ips)
+        for ip in ips:
+            if can_connect(ip, 22):
+                return ip
+        raise ConnectionError(host)
 
     def get_env(self, other_env=None):
         """Get environment variables to be set in the spawned process."""
@@ -183,12 +294,12 @@ class SSHSpawner(LocalProcessSpawner):
         env['JUPYTERHUB_CLEANUP_SERVERS'] = self.cleanup_server
         env['JUPYTERHUB_CHECK_INTERVAL'] = self.hub_check_interval * 60
         env['JUPYTERHUB_MAX_LIFETIME'] = self.notebook_max_lifetime * 60 * 60
-        env['JUPYTERHUB_SSL_KEYFILE'] = self.ssl_files.get('keyfile', '')
-        env['JUPYTERHUB_SSL_CERTFILE'] = self.ssl_files.get('certfile', '')
-        env['JUPYTERHUB_SSL_CAFILE'] = self.ssl_files.get('cafile', '')
+        env['JUPYTERHUB_SSL_KEYFILE'] = self.cert_paths.get('keyfile', '')
+        env['JUPYTERHUB_SSL_CERTFILE'] = self.cert_paths.get('certfile', '')
+        env['JUPYTERHUB_SSL_CAFILE'] = self.cert_paths.get('cafile', '')
 
         # If the user starting their notebook is in the list of admins
-        if self.user.name in self.settings.get('admin_users', []):
+        if self.user.name in self.user.settings.get('admin_users', []):
             env['JUPYTERHUB_ADMIN_ACCESS'] = 1
         else:
             env['JUPYTERHUB_ADMIN_ACCESS'] = 0
@@ -203,10 +314,12 @@ class SSHSpawner(LocalProcessSpawner):
         """
 
         args = super().get_args()
-        args.append(
-            '--SingleUserNotebookApp.allow_origin_pat={patt}'
-            .format(patt='.*\.llnl\.gov')
-        )
+        if self.allow_origin_pattern:
+            args.append(
+                '--SingleUserNotebookApp.allow_origin_pat={patt}'
+                .format(patt=self.allow_origin_pattern)
+            )
+
         args.append(
             '--MappingKernelManager.cull_idle_timeout={timeout}'
             .format(timeout=self.idle_timeout)
@@ -236,8 +349,9 @@ class SSHSpawner(LocalProcessSpawner):
         cert = os.path.join(self.resource_path, cert_base_name)
         ca = os.path.join(self.resource_path, ca_base_name)
 
-        # Set cert ownership to user
-        for f in [self.local_resource_path, key, cert, ca]:
+        # Set directory and cert ownership to user
+        for f in [self.local_resource_path + "/" + _
+                  for _ in ["", key_base_name, cert_base_name, ca_base_name]]:
             shutil.chown(f, user=uid, group=gid)
 
         return {
@@ -246,39 +360,51 @@ class SSHSpawner(LocalProcessSpawner):
             "cafile": ca
         }
 
+    async def create_start_script(self, start_script, remote_env=None):
+        user = pwd.getpwnam(self.user.name)
+        uid = user.pw_uid
+        gid = user.pw_gid
+        env = self.get_env(other_env=remote_env)
+        quoted_env = ["env"] +\
+                     [pipes.quote("{var}={val}".format(var=var, val=val))
+                      for var, val in env.items()]
+        # environment + cmd + args
+        cmd = quoted_env + self.cmd + self.get_args()
+
+        with open(start_script, "w") as fh:
+            fh.write(
+                _script_template.format(' '.join(cmd))
+            )
+            shutil.chown(start_script, user=uid, group=gid)
+            os.chmod(
+                start_script,
+                stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+            )
+
     async def start(self):
+        start_script = os.path.join(
+            self.local_resource_path,
+            self.start_notebook_cmd
+        )
+
         try:
             self.port = random_port()
             host = pipes.quote(self.user_options['host'])
-            env = self.get_env(other_env=await self.remote_env(host=host))
-            self.ssh_target = get_target_ip(host)
+            self.ssh_target = self.ip_for_host(host)
+            remote_env = await self.remote_env(host=self.ssh_target)
+            opts = self.ssh_opts(
+                persist=self.ssh_control_persist_time,
+                known_hosts=self.known_hosts
+            )
 
             # Create the start script (part of resources)
-            start_script = os.path.join(
-                self.local_resource_path,
-                "start-notebook"
-            )
-            with open(start_script, "w") as fh:
-                fh.write(
-                    """
-                    #!/bin/bash
-                    # entrypoint for shared kernel link?
-                    # start the notebook with appropriate args
-                    env {env} {cmd} {args}
-                    """.format(
-                        env=[pipes.quote(
-                                "{var}={val}".format(var=var, val=val)
-                             )
-                             for var, val in env.items()],
-                        cmd=self.cmd,
-                        args=self.get_args()
-                    )
-                )
+            await self.create_start_script(start_script, remote_env=remote_env)
 
             # Create remote directory in user's home
-            create_dir_proc = await self.expect_as_user(
-                "ssh {opts} mkdir -p {path}".format(
-                    opts=ssh_opts(),
+            create_dir_proc = await self.spawn_as_user(
+                "ssh {opts} {host} mkdir -p {path}".format(
+                    opts=opts,
+                    host=self.ssh_target,
                     path=self.resource_path
                 )
             )
@@ -286,18 +412,18 @@ class SSHSpawner(LocalProcessSpawner):
 
             # Copy resources, this includes certs (they were moved to
             # self.local_resource_path in `.move_certs`
-            copy_files_proc = await self.expect_as_user(
-                "scp {opts} -r {cp_dir}/ {server}:{target_dir}".format(
-                    opts=ssh_opts(persist=180),
+            copy_files_proc = await self.spawn_as_user(
+                "scp {opts} -r {cp_dir} {host}:{target_dir}/".format(
+                    opts=opts,
                     cp_dir=self.local_resource_path,
-                    server=self.ssh_target,
+                    host=self.ssh_target,
                     target_dir=os.path.dirname(self.resource_path)
                 )
             )
             i = copy_files_proc.expect([
                 ".*No such file or directory",
                 "ssh: Could not resolve hostname",
-                ".*ETA"
+                pexpect.EOF,
             ])
 
             if i == 0:
@@ -314,17 +440,19 @@ class SSHSpawner(LocalProcessSpawner):
                 ))
 
             # Start remote notebook
-            self.proc = await self.expect_as_user(
+            start_notebook_child = await self.spawn_as_user(
                 "ssh {opts} -L {port}:{ip}:{port} {host} {cmd}".format(
                     ip="127.0.0.1",
                     port=self.port,
-                    opts=ssh_opts(),
+                    opts=opts,
                     host=self.ssh_target,
-                    cmd=os.path.join(self.resource_path, "start-notebook")
+                    cmd=os.path.join(self.resource_path,
+                                     self.start_notebook_cmd)
                 ),
                 timeout=None
             )
 
+            self.proc = start_notebook_child.proc
             self.pid = self.proc.pid
 
             if self.ip:
@@ -352,9 +480,9 @@ class SSHSpawner(LocalProcessSpawner):
                       "{host}".format(user=self.user.name, port=self.port,
                                       host=self.ssh_target))
 
-        stop_child = self.expect_as_user("ssh {opts} {cmd}".format(
-                opts=ssh_opts(),
-                cmd=self.notebook_stop_cmd
+        stop_child = self.spawn_as_user("ssh {opts} {cmd}".format(
+                opts=self.ssh_opts(known_hosts=self.known_hosts),
+                cmd=self.stop_notebook_cmd
             )
         )
         stop_child.expect(pexpect.EOF)
@@ -377,7 +505,13 @@ class SSHSpawner(LocalProcessSpawner):
         if status is not None:
             return status
         else:
-            url = "https://127.0.0.1:{port}".format(port=self.port)
+            protocol = "http" if not self.user.settings["internal_ssl"] \
+                       else "https"
+            url = "{protocol}://{ip}:{port}".format(
+                        protocol=protocol,
+                        ip=self.ip,
+                        port=self.port
+                  )
             key = self.user.settings.get('internal_ssl_key')
             cert = self.user.settings.get('internal_ssl_cert')
             ca = self.user.settings.get('internal_ssl_ca')
