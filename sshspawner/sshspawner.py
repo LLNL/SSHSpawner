@@ -19,7 +19,7 @@ import stat
 import pexpect
 import shutil
 from pexpect import popen_spawn
-from tempfile import mkdtemp
+from tempfile import TemporaryDirectory
 from jupyterhub.spawner import LocalProcessSpawner
 from traitlets import default
 from traitlets import (
@@ -29,8 +29,7 @@ from jupyterhub.utils import (
     random_port, can_connect, wait_for_http_server, make_ssl_context
 )
 
-_script_template = """
-#!/bin/bash
+_script_template = """#!/bin/bash
 # entrypoint for shared kernel link?
 # start the notebook with appropriate args
 {}
@@ -50,8 +49,6 @@ class ConnectionError(Exception):
 
 
 class SSHSpawner(LocalProcessSpawner):
-    local_resource_path = "/tmp"
-
     ssh_target = ""
 
     resource_path = Unicode(
@@ -110,7 +107,7 @@ class SSHSpawner(LocalProcessSpawner):
     ).tag(config=True)
 
     start_notebook_cmd = Unicode(
-        "stop-notebook",
+        "start-notebook",
         help="""The command to run to start a notebook"""
     ).tag(config=True)
 
@@ -121,7 +118,6 @@ class SSHSpawner(LocalProcessSpawner):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.local_resource_path = mkdtemp()
 
     def get_user_ssh_hosts(self):
         return self.ssh_hosts
@@ -132,7 +128,6 @@ class SSHSpawner(LocalProcessSpawner):
 
         hosts = self.get_user_ssh_hosts()
         if not hosts:
-            # FIXME: Need a better way of testing this ahead of time
             return """
             <p>Unable to get SSH targets</p>
             """
@@ -263,7 +258,8 @@ class SSHSpawner(LocalProcessSpawner):
             child = await self.spawn_as_user(
                 "ssh {opts} {host} env".format(opts=opts, host=host)
             )
-            return env_str_to_dict(child.after)
+            child.expect(pexpect.EOF)
+            return env_str_to_dict(child.before)
 
     def ip_for_host(self, host):
         """Return an ip for a given host
@@ -332,14 +328,10 @@ class SSHSpawner(LocalProcessSpawner):
 
         return args
 
-    async def move_certs(self, paths):
-        user = pwd.getpwnam(self.user.name)
-        uid = user.pw_uid
-        gid = user.pw_gid
-
-        shutil.move(paths['keyfile'], self.local_resource_path)
-        shutil.move(paths['certfile'], self.local_resource_path)
-        shutil.copy(paths['cafile'], self.local_resource_path)
+    def stage_certs(self, paths, dest):
+        shutil.move(paths['keyfile'], dest)
+        shutil.move(paths['certfile'], dest)
+        shutil.copy(paths['cafile'], dest)
 
         key_base_name = os.path.basename(paths['keyfile'])
         cert_base_name = os.path.basename(paths['certfile'])
@@ -349,15 +341,10 @@ class SSHSpawner(LocalProcessSpawner):
         cert = os.path.join(self.resource_path, cert_base_name)
         ca = os.path.join(self.resource_path, ca_base_name)
 
-        # Set directory and cert ownership to user
-        for f in [self.local_resource_path + "/" + _
-                  for _ in ["", key_base_name, cert_base_name, ca_base_name]]:
-            shutil.chown(f, user=uid, group=gid)
-
         return {
             "keyfile": key,
             "certfile": cert,
-            "cafile": ca
+            "cafile": ca,
         }
 
     async def create_start_script(self, start_script, remote_env=None):
@@ -382,12 +369,16 @@ class SSHSpawner(LocalProcessSpawner):
             )
 
     async def start(self):
-        start_script = os.path.join(
-            self.local_resource_path,
-            self.start_notebook_cmd
-        )
+        with TemporaryDirectory() as td:
+            local_resource_path = td
+            start_script = os.path.join(
+                local_resource_path,
+                self.start_notebook_cmd
+            )
 
-        try:
+            user = pwd.getpwnam(self.user.name)
+            uid = user.pw_uid
+            gid = user.pw_gid
             self.port = random_port()
             host = pipes.quote(self.user_options['host'])
             self.ssh_target = self.ip_for_host(host)
@@ -397,8 +388,19 @@ class SSHSpawner(LocalProcessSpawner):
                 known_hosts=self.known_hosts
             )
 
+            self.cert_paths = self.stage_certs(
+                self.cert_paths,
+                local_resource_path
+            )
+
             # Create the start script (part of resources)
             await self.create_start_script(start_script, remote_env=remote_env)
+
+            # Set proper ownership to the user we'll run as
+            for f in [local_resource_path] + \
+                     [os.path.join(local_resource_path, f)
+                      for f in os.listdir(local_resource_path)]:
+                shutil.chown(f, user=uid, group=gid)
 
             # Create remote directory in user's home
             create_dir_proc = await self.spawn_as_user(
@@ -410,12 +412,12 @@ class SSHSpawner(LocalProcessSpawner):
             )
             create_dir_proc.expect(pexpect.EOF)
 
-            # Copy resources, this includes certs (they were moved to
-            # self.local_resource_path in `.move_certs`
             copy_files_proc = await self.spawn_as_user(
-                "scp {opts} -r {cp_dir} {host}:{target_dir}/".format(
+                "scp {opts} {files} {host}:{target_dir}/".format(
                     opts=opts,
-                    cp_dir=self.local_resource_path,
+                    files=' '.join([os.path.join(local_resource_path, f)
+                                    for f in os.listdir(local_resource_path)]),
+                    cp_dir=local_resource_path,
                     host=self.ssh_target,
                     target_dir=os.path.dirname(self.resource_path)
                 )
@@ -428,7 +430,7 @@ class SSHSpawner(LocalProcessSpawner):
 
             if i == 0:
                 raise IOError("No such file or directory: {}".format(
-                    self.local_resource_path))
+                    local_resource_path))
             elif i == 1:
                 raise HostNotFound(
                     "Could not resolve hostname {}".format(self.ssh_target)
@@ -460,9 +462,6 @@ class SSHSpawner(LocalProcessSpawner):
             self.user.server.port = self.port
 
             return (self.ip or '127.0.0.1', self.port)
-        finally:
-            # After start, the temporary resource path is no longer necessary
-            shutil.rmtree(self.local_resource_path)
 
     async def stop(self, now=False):
         """Stop the remote single-user server process for the current user.

@@ -129,22 +129,3 @@ async def test_create_start_script(db):
                     re.search(r"\s*/bin/env\s*", script, re.M),
                     re.search(r"\s*/usr/bin/env\s*", script, re.M)
                 ])
-
-
-async def test_move_certs(db):
-    spawner = new_spawner(db)
-
-    _, key = mkstemp()
-    _, cert = mkstemp()
-    _, ca = mkstemp()
-    original_paths = {
-        "keyfile": key,
-        "certfile": cert,
-        "cafile": ca,
-    }
-    paths = await spawner.move_certs(original_paths)
-
-    # While located elsewhere on the hub host, the path we care about will
-    # be relative to the users home directory on the remote host
-    assert all([re.search(spawner.resource_path, path)
-                for path in paths.values()])
