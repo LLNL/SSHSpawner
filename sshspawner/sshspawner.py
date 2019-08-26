@@ -505,7 +505,7 @@ class SSHSpawner(LocalProcessSpawner):
                        else "https"
             url = "{protocol}://{ip}:{port}".format(
                         protocol=protocol,
-                        ip=self.ip,
+                        ip=(self.ip or '127.0.0.1'),
                         port=self.port
                   )
             key = self.user.settings.get('internal_ssl_key')
