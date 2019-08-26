@@ -116,9 +116,6 @@ class SSHSpawner(LocalProcessSpawner):
         help="""The command to run to stop a running notebook"""
     ).tag(config=True)
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
     def get_user_ssh_hosts(self):
         return self.ssh_hosts
 
