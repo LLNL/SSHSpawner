@@ -18,6 +18,7 @@ import random
 import stat
 import pexpect
 import shutil
+from urllib.parse import urlparse, urlunparse
 from pexpect import popen_spawn
 from tempfile import TemporaryDirectory
 from jupyterhub.spawner import LocalProcessSpawner
@@ -57,6 +58,11 @@ class SSHSpawner(LocalProcessSpawner):
         Generally left relative so that resources are placed into this base
         directory in the users home directory.
         """
+    ).tag(config=True)
+
+    hostname = Unicode(
+        "",
+        help="Hostname of the hub host. Useful if the Hub is in a container."
     ).tag(config=True)
 
     known_hosts = Unicode(
@@ -276,6 +282,13 @@ class SSHSpawner(LocalProcessSpawner):
     def get_env(self, other_env=None):
         """Get environment variables to be set in the spawned process."""
 
+        def swap_host(url, hostname=""):
+            if not hostname:
+                return url
+            parsed = urlparse(url)
+            parsed = parsed._replace(netloc=hostname + ":" + str(parsed.port))
+            return urlunparse(parsed)
+
         env = super().get_env()
         if other_env:
             env.update(other_env)
@@ -290,6 +303,18 @@ class SSHSpawner(LocalProcessSpawner):
         env['JUPYTERHUB_SSL_KEYFILE'] = self.cert_paths.get('keyfile', '')
         env['JUPYTERHUB_SSL_CERTFILE'] = self.cert_paths.get('certfile', '')
         env['JUPYTERHUB_SSL_CAFILE'] = self.cert_paths.get('cafile', '')
+
+        # This is to account for running JupyterHub in a container since the
+        # container hostname will be meaningless.
+        env['JUPYTERHUB_API_URL'] = swap_host(
+            env['JUPYTERHUB_API_URL'],
+            hostname=self.hostname
+        )
+
+        env['JUPYTERHUB_ACTIVITY_URL'] = swap_host(
+            env['JUPYTERHUB_ACTIVITY_URL'],
+            hostname=self.hostname
+        )
 
         # If the user starting their notebook is in the list of admins
         if self.user.name in self.user.settings.get('admin_users', []):
