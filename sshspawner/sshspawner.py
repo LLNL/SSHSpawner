@@ -416,7 +416,7 @@ class SSHSpawner(LocalProcessSpawner):
                                     for f in os.listdir(local_resource_path)]),
                     cp_dir=local_resource_path,
                     host=self.ssh_target,
-                    target_dir=os.path.dirname(self.resource_path)
+                    target_dir=self.resource_path
                 )
             )
             i = copy_files_proc.expect([
