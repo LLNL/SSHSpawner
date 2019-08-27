@@ -501,7 +501,7 @@ class SSHSpawner(LocalProcessSpawner):
                       "{host}".format(user=self.user.name, port=self.port,
                                       host=self.ssh_target))
 
-        stop_child = self.spawn_as_user("ssh {opts} {cmd}".format(
+        stop_child = await self.spawn_as_user("ssh {opts} {cmd}".format(
                 opts=self.ssh_opts(known_hosts=self.known_hosts),
                 cmd=self.stop_notebook_cmd
             )
