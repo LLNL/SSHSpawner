@@ -73,7 +73,7 @@ def test_ips_for_host(db):
 async def test_spawn_as_user(db):
     spawner = new_spawner(db)
 
-    child = await spawner.spawn_as_user("env", timeout=2)
+    child = spawner.spawn_as_user("env", timeout=2)
     out = child.read()
     lines = out.split("\n")
 

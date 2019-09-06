@@ -207,17 +207,19 @@ class SSHSpawner(LocalProcessSpawner):
         return ' '.join(
                 [tmpl.format(opt=opt, val=val) for opt, val in opts.items()])
 
-    async def spawn_as_user(self, cmd, timeout=10):
+    def spawn_as_user(self, cmd, timeout=10):
         """Run pexpect as the user spawning the notebook
 
         This method attaches kerberos credentals to the command env if they
         exist.
         """
 
+        user = pwd.getpwnam(self.user.name)
+        uid = user.pw_uid
         env = os.environ
-        auth_state = await self.user.get_auth_state()
-        if auth_state:
-            env["KRB5CCNAME"] = auth_state.get("krb5ccname", "")
+        krb_files = glob("/tmp/krb5cc_{uid}*".format(uid=uid))
+        if krb_files:
+            env["KRB5CCNAME"] = max(krb_files, key=os.path.getctime)
 
         popen_kwargs = dict(
             env=env,
@@ -258,7 +260,7 @@ class SSHSpawner(LocalProcessSpawner):
                 known_hosts=self.known_hosts
             )
             self.log.info("Collecting remote environment from {}".format(host))
-            child = await self.spawn_as_user(
+            child = self.spawn_as_user(
                 "ssh {opts} {host} env".format(opts=opts, host=host)
             )
             child.expect(pexpect.EOF)
@@ -422,7 +424,7 @@ class SSHSpawner(LocalProcessSpawner):
                 shutil.chown(f, user=uid, group=gid)
 
             # Create remote directory in user's home
-            create_dir_proc = await self.spawn_as_user(
+            create_dir_proc = self.spawn_as_user(
                 "ssh {opts} {host} mkdir -p {path}".format(
                     opts=opts,
                     host=self.ssh_target,
@@ -431,7 +433,7 @@ class SSHSpawner(LocalProcessSpawner):
             )
             create_dir_proc.expect(pexpect.EOF)
 
-            copy_files_proc = await self.spawn_as_user(
+            copy_files_proc = self.spawn_as_user(
                 "scp {opts} {files} {host}:{target_dir}/".format(
                     opts=opts,
                     files=' '.join([os.path.join(local_resource_path, f)
@@ -461,7 +463,7 @@ class SSHSpawner(LocalProcessSpawner):
                 ))
 
             # Start remote notebook
-            start_notebook_child = await self.spawn_as_user(
+            start_notebook_child = self.spawn_as_user(
                 "ssh {opts} -L {port}:{ip}:{port} {host} {cmd}".format(
                     ip="127.0.0.1",
                     port=self.port,
@@ -498,8 +500,9 @@ class SSHSpawner(LocalProcessSpawner):
                       "{host}".format(user=self.user.name, port=self.port,
                                       host=self.ssh_target))
 
-        stop_child = await self.spawn_as_user("ssh {opts} {cmd}".format(
+        stop_child = self.spawn_as_user("ssh {opts} {host} {cmd}".format(
                 opts=self.ssh_opts(known_hosts=self.known_hosts),
+                host=self.ssh_target,
                 cmd=self.stop_notebook_cmd
             )
         )
