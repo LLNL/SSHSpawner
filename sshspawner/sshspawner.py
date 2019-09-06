@@ -18,6 +18,7 @@ import random
 import stat
 import pexpect
 import shutil
+from glob import glob
 from urllib.parse import urlparse, urlunparse
 from pexpect import popen_spawn
 from tempfile import TemporaryDirectory
@@ -496,7 +497,10 @@ class SSHSpawner(LocalProcessSpawner):
         think itself orphaned and shut itself down.
         """
 
-        self.log.info("Stopping user {user}'s notebook at port {port} on host"
+        status = await self.poll()
+        if status is not None:
+            return
+        self.log.info("Stopping user {user}'s notebook at port {port} on host "
                       "{host}".format(user=self.user.name, port=self.port,
                                       host=self.ssh_target))
 
@@ -507,6 +511,13 @@ class SSHSpawner(LocalProcessSpawner):
             )
         )
         stop_child.expect(pexpect.EOF)
+
+        # close the tunnel(s)
+        socket_patt = re.compile(r"\w+@\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+")
+        sockets = [s for s in os.scandir(path="/tmp")
+                   if socket_patt.match(s.name) and self.user.name in s.name]
+        for socket in sockets:
+            os.remove(socket)
 
         # TODO: get returncode?
 
