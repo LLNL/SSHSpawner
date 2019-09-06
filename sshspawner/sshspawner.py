@@ -18,6 +18,7 @@ import random
 import stat
 import pexpect
 import shutil
+import signal
 from glob import glob
 from urllib.parse import urlparse, urlunparse
 from pexpect import popen_spawn
@@ -511,6 +512,12 @@ class SSHSpawner(LocalProcessSpawner):
             )
         )
         stop_child.expect(pexpect.EOF)
+        ret_code = stop_child.wait()
+        if ret_code == 0:
+            self.log.info("Notebook stopped")
+
+        self.log.debug("Killing %i", self.pid)
+        await self._signal(signal.SIGKILL)
 
         # close the tunnel(s)
         socket_patt = re.compile(r"\w+@\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+")
@@ -518,10 +525,6 @@ class SSHSpawner(LocalProcessSpawner):
                    if socket_patt.match(s.name) and self.user.name in s.name]
         for socket in sockets:
             os.remove(socket)
-
-        # TODO: get returncode?
-
-        await super().stop(now=now)
 
     async def poll(self):
         """Poll the spawned process to see if it is still running and reachable
