@@ -300,9 +300,6 @@ class SSHSpawner(LocalProcessSpawner):
         env['JUPYTERHUB_CLEANUP_SERVERS'] = self.cleanup_server
         env['JUPYTERHUB_CHECK_INTERVAL'] = self.hub_check_interval * 60
         env['JUPYTERHUB_MAX_LIFETIME'] = self.notebook_max_lifetime * 60 * 60
-        env['JUPYTERHUB_SSL_KEYFILE'] = self.cert_paths.get('keyfile', '')
-        env['JUPYTERHUB_SSL_CERTFILE'] = self.cert_paths.get('certfile', '')
-        env['JUPYTERHUB_SSL_CAFILE'] = self.cert_paths.get('cafile', '')
 
         # This is to account for running JupyterHub in a container since the
         # container hostname will be meaningless.
