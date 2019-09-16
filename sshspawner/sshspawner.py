@@ -124,6 +124,13 @@ class SSHSpawner(LocalProcessSpawner):
         help="""The command to run to stop a running notebook"""
     ).tag(config=True)
 
+    @property
+    def ssh_socket(self):
+        return "{user}@{host}".format(
+            user=self.user.name,
+            host=self.ssh_target
+        )
+
     def get_user_ssh_hosts(self):
         return self.ssh_hosts
 
@@ -176,7 +183,7 @@ class SSHSpawner(LocalProcessSpawner):
 
             return lines
 
-    def ssh_opts(self, sockets="/tmp/%r@%h:%p", persist=180,
+    def ssh_opts(self, persist=180,
                  known_hosts="", batch_mode=True, other_opts=None):
         """Default set of options to attach to ssh commands
 
@@ -191,7 +198,7 @@ class SSHSpawner(LocalProcessSpawner):
 
         opts = {
             "ControlMaster": "auto",
-            "ControlPath": sockets,
+            "ControlPath": "/tmp/%r@%h",
             "ControlPersist": persist,
             "BatchMode": batch_mode,
         }
@@ -519,12 +526,8 @@ class SSHSpawner(LocalProcessSpawner):
         self.log.debug("Killing %i", self.pid)
         await self._signal(signal.SIGKILL)
 
-        # close the tunnel(s)
-        socket_patt = re.compile(r"\w+@\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+")
-        sockets = [s for s in os.scandir(path="/tmp")
-                   if socket_patt.match(s.name) and self.user.name in s.name]
-        for socket in sockets:
-            os.remove(socket)
+        # close the tunnel
+        os.remove(self.ssh_socket)
 
     async def poll(self):
         """Poll the spawned process to see if it is still running and reachable
@@ -539,6 +542,9 @@ class SSHSpawner(LocalProcessSpawner):
 
         if status is not None:
             return status
+        elif not os.path.exists(self.ssh_socket):
+            # tunnel is closed or non-existent
+            return 0
         else:
             protocol = "http" if not self.user.settings["internal_ssl"] \
                        else "https"
