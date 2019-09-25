@@ -141,7 +141,8 @@ class SSHSpawner(LocalProcessSpawner):
         hosts = self.get_user_ssh_hosts()
         if not hosts:
             return """
-            <p>Unable to get SSH targets</p>
+            <label for="host">Input host for notebook launch:</label>
+            <input type="text" name="host" class="form-control">
             """
         host_option_template = '<option value="{host}">{host}</option>'
         host_option_tags = []
@@ -159,7 +160,7 @@ class SSHSpawner(LocalProcessSpawner):
         """Turn html formdata from `options_form` into a dict for later use"""
 
         options = {}
-        options['host'] = formdata.get('host', [''])[0].strip()
+        options['host'] = pipes.quote(formdata.get('host', [''])[0].strip())
         return options
 
     def ips_for_host(self, host):
