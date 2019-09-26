@@ -126,7 +126,7 @@ class SSHSpawner(LocalProcessSpawner):
 
     @property
     def ssh_socket(self):
-        return "{user}@{host}".format(
+        return "/tmp/{user}@{host}".format(
             user=self.user.name,
             host=self.ssh_target
         )
