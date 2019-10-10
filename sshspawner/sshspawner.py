@@ -229,7 +229,7 @@ class SSHSpawner(LocalProcessSpawner):
         env = os.environ
         krb_files = glob("/tmp/krb5cc_{uid}*".format(uid=uid))
         if krb_files:
-            env["KRB5CCNAME"] = max(krb_files, key=os.path.getctime)
+            env["KRB5CCNAME"] = "FILE:" + max(krb_files, key=os.path.getctime)
 
         popen_kwargs = dict(
             env=env,
