@@ -58,6 +58,7 @@ class SSHSpawner(LocalProcessSpawner):
         self.uid = user.pw_uid
         self.gid = user.pw_gid
         self.ssh_target = ""
+        os.makedirs(self.local_resource_path, 0o700, exist_ok=True)
 
     resource_path = Unicode(
         ".jupyter/jupyterhub/resources",
@@ -130,10 +131,23 @@ class SSHSpawner(LocalProcessSpawner):
     ).tag(config=True)
 
     @property
+    def local_resource_path(self):
+        return "/tmp/{user}".format(user=self.user.name)
+
+    @property
     def ssh_socket(self):
-        return "/tmp/{user}@{host}".format(
+        name = "{user}@{host}".format(
             user=self.user.name,
             host=self.ssh_target
+        )
+
+        return os.path.join(self.local_resource_path, name)
+
+    @property
+    def start_script(self):
+        return os.path.join(
+            self.local_resource_path,
+            self.start_notebook_cmd
         )
 
     def get_user_ssh_hosts(self):
@@ -381,7 +395,7 @@ class SSHSpawner(LocalProcessSpawner):
             "cafile": ca,
         }
 
-    async def create_start_script(self, start_script, remote_env=None):
+    async def create_start_script(self, remote_env=None):
         env = self.get_env(other_env=remote_env)
         quoted_env = ["env"] +\
                      [pipes.quote("{var}={val}".format(var=var, val=val))
@@ -389,107 +403,101 @@ class SSHSpawner(LocalProcessSpawner):
         # environment + cmd + args
         cmd = quoted_env + self.cmd + self.get_args()
 
-        with open(start_script, "w") as fh:
+        with open(self.start_script, "w") as fh:
             fh.write(
                 _script_template.format(' '.join(cmd))
             )
-            shutil.chown(start_script, user=self.uid, group=self.gid)
+            shutil.chown(self.start_script, user=self.uid, group=self.gid)
             os.chmod(
-                start_script,
+                self.start_script,
                 stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
             )
 
     async def start(self):
-        with TemporaryDirectory() as td:
-            local_resource_path = td
-            start_script = os.path.join(
-                local_resource_path,
-                self.start_notebook_cmd
+
+        self.port = random_port()
+        host = pipes.quote(self.user_options['host'])
+        self.ssh_target = self.ip_for_host(host)
+        remote_env = await self.remote_env(host=self.ssh_target)
+        opts = self.ssh_opts(
+            persist=self.ssh_control_persist_time,
+            known_hosts=self.known_hosts
+        )
+
+        self.cert_paths = self.stage_certs(
+            self.cert_paths,
+            self.local_resource_path
+        )
+
+        # Create the start script (part of resources)
+        await self.create_start_script(remote_env=remote_env)
+
+        # Set proper ownership to the user we'll run as
+        for f in [self.local_resource_path] + \
+                 [os.path.join(local_resource_path, f)
+                  for f in os.listdir(local_resource_path)]:
+            shutil.chown(f, user=self.uid, group=self.gid)
+
+        # Create remote directory in user's home
+        create_dir_proc = self.spawn_as_user(
+            "ssh {opts} {host} mkdir -p {path}".format(
+                opts=opts,
+                host=self.ssh_target,
+                path=self.resource_path
             )
+        )
+        create_dir_proc.expect(pexpect.EOF)
 
-            self.port = random_port()
-            host = pipes.quote(self.user_options['host'])
-            self.ssh_target = self.ip_for_host(host)
-            remote_env = await self.remote_env(host=self.ssh_target)
-            opts = self.ssh_opts(
-                persist=self.ssh_control_persist_time,
-                known_hosts=self.known_hosts
+        copy_files_proc = self.spawn_as_user(
+            "scp {opts} {files} {host}:{target_dir}/".format(
+                opts=opts,
+                files=' '.join([os.path.join(self.local_resource_path, f)
+                                for f in os.listdir(self.local_resource_path)]),
+                cp_dir=self.local_resource_path,
+                host=self.ssh_target,
+                target_dir=self.resource_path
             )
+        )
+        i = copy_files_proc.expect([
+            ".*No such file or directory",
+            "ssh: Could not resolve hostname",
+            pexpect.EOF,
+        ])
 
-            self.cert_paths = self.stage_certs(
-                self.cert_paths,
-                local_resource_path
+        if i == 0:
+            raise IOError("No such file or directory: {}".format(
+                self.local_resource_path))
+        elif i == 1:
+            raise HostNotFound(
+                "Could not resolve hostname {}".format(self.ssh_target)
             )
+        elif i == 2:
+            self.log.info("Copied resources for {user} to {host}".format(
+                user=self.user.name,
+                host=self.ssh_target
+            ))
 
-            # Create the start script (part of resources)
-            await self.create_start_script(start_script, remote_env=remote_env)
+        # Start remote notebook
+        start_notebook_child = self.spawn_as_user(
+            "ssh {opts} -L {port}:{ip}:{port} {host} {cmd}".format(
+                ip="127.0.0.1",
+                port=self.port,
+                opts=opts,
+                host=self.ssh_target,
+                cmd=os.path.join(self.resource_path,
+                                 self.start_notebook_cmd)
+            ),
+            timeout=None
+        )
 
-            # Set proper ownership to the user we'll run as
-            for f in [local_resource_path] + \
-                     [os.path.join(local_resource_path, f)
-                      for f in os.listdir(local_resource_path)]:
-                shutil.chown(f, user=self.uid, group=self.gid)
+        self.proc = start_notebook_child.proc
+        self.pid = self.proc.pid
 
-            # Create remote directory in user's home
-            create_dir_proc = self.spawn_as_user(
-                "ssh {opts} {host} mkdir -p {path}".format(
-                    opts=opts,
-                    host=self.ssh_target,
-                    path=self.resource_path
-                )
-            )
-            create_dir_proc.expect(pexpect.EOF)
+        if self.ip:
+            self.user.server.ip = self.ip
+        self.user.server.port = self.port
 
-            copy_files_proc = self.spawn_as_user(
-                "scp {opts} {files} {host}:{target_dir}/".format(
-                    opts=opts,
-                    files=' '.join([os.path.join(local_resource_path, f)
-                                    for f in os.listdir(local_resource_path)]),
-                    cp_dir=local_resource_path,
-                    host=self.ssh_target,
-                    target_dir=self.resource_path
-                )
-            )
-            i = copy_files_proc.expect([
-                ".*No such file or directory",
-                "ssh: Could not resolve hostname",
-                pexpect.EOF,
-            ])
-
-            if i == 0:
-                raise IOError("No such file or directory: {}".format(
-                    local_resource_path))
-            elif i == 1:
-                raise HostNotFound(
-                    "Could not resolve hostname {}".format(self.ssh_target)
-                )
-            elif i == 2:
-                self.log.info("Copied resources for {user} to {host}".format(
-                    user=self.user.name,
-                    host=self.ssh_target
-                ))
-
-            # Start remote notebook
-            start_notebook_child = self.spawn_as_user(
-                "ssh {opts} -L {port}:{ip}:{port} {host} {cmd}".format(
-                    ip="127.0.0.1",
-                    port=self.port,
-                    opts=opts,
-                    host=self.ssh_target,
-                    cmd=os.path.join(self.resource_path,
-                                     self.start_notebook_cmd)
-                ),
-                timeout=None
-            )
-
-            self.proc = start_notebook_child.proc
-            self.pid = self.proc.pid
-
-            if self.ip:
-                self.user.server.ip = self.ip
-            self.user.server.port = self.port
-
-            return (self.ip or '127.0.0.1', self.port)
+        return (self.ip or '127.0.0.1', self.port)
 
     async def stop(self, now=False):
         """Stop the remote single-user server process for the current user.

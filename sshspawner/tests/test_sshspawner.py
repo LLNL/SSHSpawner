@@ -134,14 +134,13 @@ def test_get_args(db):
 async def test_create_start_script(db):
     spawner = new_spawner(db)
 
-    with NamedTemporaryFile() as tf:
-        await spawner.create_start_script(tf.name)
-        with open(tf.name) as fh:
-            script = fh.read()
-            assert script
-            assert "#!/bin/bash" in script
-            assert any([
-                    re.search(r"\s*env\s*", script, re.M),
-                    re.search(r"\s*/bin/env\s*", script, re.M),
-                    re.search(r"\s*/usr/bin/env\s*", script, re.M)
-                ])
+    await spawner.create_start_script()
+    with open(spawner.start_script) as fh:
+        script = fh.read()
+        assert script
+        assert "#!/bin/bash" in script
+        assert any([
+                re.search(r"\s*env\s*", script, re.M),
+                re.search(r"\s*/bin/env\s*", script, re.M),
+                re.search(r"\s*/usr/bin/env\s*", script, re.M)
+            ])
