@@ -52,7 +52,12 @@ class ConnectionError(Exception):
 
 
 class SSHSpawner(LocalProcessSpawner):
-    ssh_target = ""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        user = pwd.getpwnam(self.user.name)
+        self.uid = user.pw_uid
+        self.gid = user.pw_gid
+        self.ssh_target = ""
 
     resource_path = Unicode(
         ".jupyter/jupyterhub/resources",
@@ -224,10 +229,8 @@ class SSHSpawner(LocalProcessSpawner):
         exist.
         """
 
-        user = pwd.getpwnam(self.user.name)
-        uid = user.pw_uid
         env = os.environ
-        krb_files = glob("/tmp/krb5cc_{uid}*".format(uid=uid))
+        krb_files = glob("/tmp/krb5cc_{uid}*".format(uid=self.uid))
         if krb_files:
             env["KRB5CCNAME"] = "FILE:" + max(krb_files, key=os.path.getctime)
 
@@ -379,9 +382,6 @@ class SSHSpawner(LocalProcessSpawner):
         }
 
     async def create_start_script(self, start_script, remote_env=None):
-        user = pwd.getpwnam(self.user.name)
-        uid = user.pw_uid
-        gid = user.pw_gid
         env = self.get_env(other_env=remote_env)
         quoted_env = ["env"] +\
                      [pipes.quote("{var}={val}".format(var=var, val=val))
@@ -393,7 +393,7 @@ class SSHSpawner(LocalProcessSpawner):
             fh.write(
                 _script_template.format(' '.join(cmd))
             )
-            shutil.chown(start_script, user=uid, group=gid)
+            shutil.chown(start_script, user=self.uid, group=self.gid)
             os.chmod(
                 start_script,
                 stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
@@ -407,9 +407,6 @@ class SSHSpawner(LocalProcessSpawner):
                 self.start_notebook_cmd
             )
 
-            user = pwd.getpwnam(self.user.name)
-            uid = user.pw_uid
-            gid = user.pw_gid
             self.port = random_port()
             host = pipes.quote(self.user_options['host'])
             self.ssh_target = self.ip_for_host(host)
@@ -431,7 +428,7 @@ class SSHSpawner(LocalProcessSpawner):
             for f in [local_resource_path] + \
                      [os.path.join(local_resource_path, f)
                       for f in os.listdir(local_resource_path)]:
-                shutil.chown(f, user=uid, group=gid)
+                shutil.chown(f, user=self.uid, group=self.gid)
 
             # Create remote directory in user's home
             create_dir_proc = self.spawn_as_user(
