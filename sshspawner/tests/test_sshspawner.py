@@ -15,6 +15,8 @@ import re
 import sys
 from tempfile import NamedTemporaryFile, mkstemp
 
+from getpass import getuser
+from pytest import fixture
 from jupyterhub import orm
 from jupyterhub.objects import Hub
 from jupyterhub.user import User
@@ -27,6 +29,20 @@ import sys, time
 print(sys.argv)
 time.sleep(30)
 """
+
+_db = None
+
+
+@fixture
+def db():
+    """Get a db session"""
+    global _db
+    if _db is None:
+        _db = orm.new_session_factory('sqlite:///:memory:')()
+        user = orm.User(name=getuser())
+        _db.add(user)
+        _db.commit()
+    return _db
 
 
 def new_spawner(db, **kwargs):
