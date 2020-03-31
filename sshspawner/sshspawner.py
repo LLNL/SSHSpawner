@@ -413,6 +413,16 @@ class SSHSpawner(LocalProcessSpawner):
                 stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
             )
 
+    def startup_files(self):
+        return [os.path.join(self.local_resource_path, f)
+                for f in os.listdir(self.local_resource_path)]
+
+    def fixperms(self):
+        # Set proper ownership to the user we'll run as
+        resources = [self.local_resource_path] + self.startup_files()
+        for resource in resources:
+            shutil.chown(resource, user=self.uid, group=self.gid)
+
     def map_to_remote_path(self, filename):
         return os.path.join(self.resource_path, os.path.basename(filename))
 
@@ -438,11 +448,7 @@ class SSHSpawner(LocalProcessSpawner):
         # Create the start script (part of resources)
         await self.create_start_script(remote_env=remote_env)
 
-        # Set proper ownership to the user we'll run as
-        for f in [self.local_resource_path] + \
-                 [os.path.join(local_resource_path, f)
-                  for f in os.listdir(local_resource_path)]:
-            shutil.chown(f, user=self.uid, group=self.gid)
+        self.fixperms()
 
         # Create remote directory in user's home
         create_dir_proc = self.spawn_as_user(
@@ -457,8 +463,7 @@ class SSHSpawner(LocalProcessSpawner):
         copy_files_proc = self.spawn_as_user(
             "scp {opts} {files} {host}:{target_dir}/".format(
                 opts=opts,
-                files=' '.join([os.path.join(self.local_resource_path, f)
-                                for f in os.listdir(self.local_resource_path)]),
+                files=' '.join(self.startup_files()),
                 cp_dir=self.local_resource_path,
                 host=self.ssh_target,
                 target_dir=self.resource_path
