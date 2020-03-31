@@ -413,6 +413,12 @@ class SSHSpawner(LocalProcessSpawner):
                 stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
             )
 
+    def map_to_remote_path(self, filename):
+        return os.path.join(self.resource_path, os.path.basename(filename))
+
+    def map_to_local_path(self, filename):
+        return os.path.join(self.resource_path, os.path.basename(filename))
+
     async def start(self):
 
         self.port = random_port()
